@@ -23,7 +23,7 @@ NOTION_DBS = {
     "vignerons":     "2643dc87a651813a8ceed8bcd55ef908",
     "clients":       "25f3dc87a651812f918ae6a277bfccdf",
     "log_emails":    "f89fcc2d89264ac08a5944cf3456b754",
-    "notes_terrain": "996af890-8ec0-4aaf-bddd-860a0b7acc0a",
+    "notes_terrain": "eba32196854b4234a8df9b5c395de754",
     "tarifs":        "90a46dc5190a4f1fabe000d0fa41e2d8",
     "devis":         "4587c0b9c6a64acc9d033b4ddeaf551a",
 }
@@ -69,22 +69,19 @@ async def notion_create_note(content: str, client_name: str = "", vigneron_name:
         title = f"{client_name} — {title}"
     elif vigneron_name:
         title = f"{vigneron_name} — {title}"
-    payload = {
-        "parent": {"type": "data_source_id", "data_source_id": NOTION_DBS["notes_terrain"]},
-        "properties": {
-            "Nom": {"title": [{"text": {"content": title}}]},
-        },
-        "children": [
-            {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": [{"type": "text", "text": {"content": content}}]}
-            }
-        ]
-    }
+    db_id = NOTION_DBS["notes_terrain"].replace("-", "")
     async with httpx.AsyncClient() as client:
-        resp = await client.post(url, headers=notion_headers, json=payload)
-        return resp.status_code in (200, 201)
+        for parent in [{"database_id": db_id}, {"database_id": NOTION_DBS["notes_terrain"]}]:
+            payload = {
+                "parent": parent,
+                "properties": {"Nom": {"title": [{"text": {"content": title}}]}},
+                "children": [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": content}}]}}]
+            }
+            resp = await client.post(url, headers=notion_headers, json=payload)
+            if resp.status_code in (200, 201):
+                return True
+            logger.error(f"Notion note error: {resp.status_code} {resp.text[:300]}")
+    return False
 
 def extract_title(page: dict) -> str:
     props = page.get("properties", {})
