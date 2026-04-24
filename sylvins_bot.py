@@ -74,7 +74,7 @@ async def notion_create_note(content: str, client_name: str = "", vigneron_name:
         for parent in [{"database_id": db_id}, {"database_id": NOTION_DBS["notes_terrain"]}]:
             payload = {
                 "parent": parent,
-                "properties": {"Nom": {"title": [{"text": {"content": title}}]}},
+                "properties": {"Résumé": {"title": [{"text": {"content": title}}]}},
                 "children": [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": content}}]}}]
             }
             resp = await client.post(url, headers=notion_headers, json=payload)
