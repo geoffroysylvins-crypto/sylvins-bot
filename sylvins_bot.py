@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Big Marta — Sylvins Bot avec intégration Notion
+Big Marta — Sylvins Bot avec intégration Notion intelligente
 Bot Telegram connecté à Claude + Notion pour Geoffroy / Sylvins
 """
 
 import os
+import json
 import logging
 import httpx
+from datetime import date
 import anthropic
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -43,6 +45,48 @@ notion_headers = {
     "Notion-Version": "2022-06-28",
 }
 
+# ── Analyse intelligente de la note par Claude ─────────────────────────────────
+
+async def analyser_note(texte: str) -> dict:
+    """Utilise Claude pour extraire les infos structurées d'une note terrain."""
+    today = date.today().isoformat()
+    prompt = f"""Analyse cette note terrain dictée par un agent commercial en vins/spiritueux et extrais les informations structurées.
+
+Note : "{texte}"
+Date du jour : {today}
+
+Réponds UNIQUEMENT en JSON valide avec ces champs :
+{{
+  "resume": "titre court 5-10 mots max",
+  "action": "Info enregistrée|RDV à planifier|Commande à passer|Rappeler|Devis à faire|Suivi à faire|Urgent",
+  "type_contact": "client|vigneron|prospect|fournisseur|team sylvins|inconnu",
+  "nom_contact": "nom du contact ou établissement mentionné, ou vide",
+  "produits_evoques": "produits mentionnés séparés par virgule, ou vide",
+  "montant": 0,
+  "note_complete": "reformulation propre et complète de la note"
+}}
+
+Règles :
+- action "Commande à passer" si une commande est mentionnée
+- action "Rappeler" si un rappel est demandé
+- action "RDV à planifier" si un rendez-vous est évoqué
+- action "Urgent" si urgence mentionnée
+- action "Devis à faire" si devis demandé
+- action "Info enregistrée" par défaut
+- montant : nombre entier en euros si mentionné, sinon 0
+- type_contact "vigneron" si c'est un domaine/producteur, "client" si CHR ou caviste"""
+
+    resp = anthropic_client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=500,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    raw = resp.content[0].text.strip()
+    # Nettoyer les backticks si présents
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    return json.loads(raw)
+
+
 # ── Fonctions Notion ────────────────────────────────────────────────────────────
 
 async def notion_query(database_id: str, query: str = "", page_size: int = 10) -> list:
@@ -62,43 +106,74 @@ async def notion_query(database_id: str, query: str = "", page_size: int = 10) -
         logger.error(f"Notion error: {resp.status_code} {resp.text[:200]}")
         return []
 
-async def notion_create_note(content: str, client_name: str = "", vigneron_name: str = "") -> bool:
-    url = "https://api.notion.com/v1/pages"
-    title = content[:80] + ("..." if len(content) > 80 else "")
-    if client_name:
-        title = f"{client_name} — {title}"
-    elif vigneron_name:
-        title = f"{vigneron_name} — {title}"
-    db_id = NOTION_DBS["notes_terrain"].replace("-", "")
+
+async def notion_create_note_intelligente(texte_original: str) -> tuple[bool, dict]:
+    """Crée une note terrain enrichie dans Notion avec analyse IA."""
+    try:
+        infos = await analyser_note(texte_original)
+        logger.info(f"Note analysée: {infos}")
+    except Exception as e:
+        logger.error(f"Erreur analyse note: {e}")
+        infos = {
+            "resume": texte_original[:80],
+            "action": "Info enregistrée",
+            "type_contact": "inconnu",
+            "nom_contact": "",
+            "produits_evoques": "",
+            "montant": 0,
+            "note_complete": texte_original
+        }
+
+    today = date.today().isoformat()
+    properties = {
+        "Résumé": {"title": [{"text": {"content": infos.get("resume", texte_original[:80])}}]},
+        "Action": {"select": {"name": infos.get("action", "Info enregistrée")}},
+        "Date": {"date": {"start": today}},
+        "Message d'origine": {"rich_text": [{"text": {"content": texte_original[:2000]}}]},
+        "Note complète": {"rich_text": [{"text": {"content": infos.get("note_complete", texte_original)[:2000]}}]},
+        "Type de contact": {"select": {"name": infos.get("type_contact", "inconnu")}},
+    }
+
+    if infos.get("nom_contact"):
+        properties["Nom contact"] = {"rich_text": [{"text": {"content": infos["nom_contact"][:200]}}]}
+
+    if infos.get("produits_evoques"):
+        properties["Produits évoqués"] = {"rich_text": [{"text": {"content": infos["produits_evoques"][:500]}}]}
+
+    if infos.get("montant") and infos["montant"] > 0:
+        properties["Montant €"] = {"number": float(infos["montant"])}
+
+    payload = {
+        "parent": {"database_id": NOTION_DBS["notes_terrain"]},
+        "properties": properties,
+    }
+
     async with httpx.AsyncClient() as client:
-        for parent in [{"database_id": db_id}, {"database_id": NOTION_DBS["notes_terrain"]}]:
-            payload = {
-                "parent": parent,
-                "properties": {"Résumé": {"title": [{"text": {"content": title}}]}},
-                "children": [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": content}}]}}]
-            }
-            resp = await client.post(url, headers=notion_headers, json=payload)
-            if resp.status_code in (200, 201):
-                return True
-            logger.error(f"Notion note error: {resp.status_code} {resp.text[:300]}")
-    return False
+        resp = await client.post("https://api.notion.com/v1/pages", headers=notion_headers, json=payload)
+        if resp.status_code in (200, 201):
+            return True, infos
+        logger.error(f"Notion create note error: {resp.status_code} {resp.text[:300]}")
+        return False, infos
+
 
 def extract_title(page: dict) -> str:
     props = page.get("properties", {})
-    for key in ["Nom", "Name", "Titre", "Title"]:
+    for key in ["Nom", "Name", "Résumé", "Titre", "Title"]:
         if key in props:
             arr = props[key].get("title", [])
             if arr:
                 return arr[0].get("text", {}).get("content", "")
     return "(sans nom)"
 
+
 def format_results(results: list, label: str) -> str:
     if not results:
         return f"Aucun résultat dans {label}."
-    lines = [f"📋 *{label}* ({len(results)} résultats)\n"]
+    lines = [f"📋 {label} ({len(results)} résultats)\n"]
     for page in results:
         lines.append(f"• {extract_title(page)}")
     return "\n".join(lines)
+
 
 # ── Outils Claude ───────────────────────────────────────────────────────────────
 
@@ -139,15 +214,13 @@ TOOLS = [
     },
     {
         "name": "ajouter_note_terrain",
-        "description": "Ajoute une note terrain dans Notion",
+        "description": "Analyse et enregistre une note terrain dans Notion avec tous les champs structurés (action, type contact, produits, date...)",
         "input_schema": {
             "type": "object",
             "properties": {
-                "contenu": {"type": "string"},
-                "client": {"type": "string"},
-                "vigneron": {"type": "string"}
+                "texte": {"type": "string", "description": "Le texte complet de la note terrain dictée par Geoffroy"}
             },
-            "required": ["contenu"]
+            "required": ["texte"]
         }
     },
     {
@@ -159,6 +232,7 @@ TOOLS = [
         }
     },
 ]
+
 
 async def execute_tool(name: str, inp: dict) -> str:
     try:
@@ -175,8 +249,19 @@ async def execute_tool(name: str, inp: dict) -> str:
             r = await notion_query(NOTION_DBS["vignerons"], page_size=inp.get("limite", 8))
             return format_results(r, "Vignerons")
         elif name == "ajouter_note_terrain":
-            ok = await notion_create_note(inp.get("contenu", ""), inp.get("client", ""), inp.get("vigneron", ""))
-            return "✅ Note terrain ajoutée dans Notion." if ok else "❌ Erreur lors de l'ajout."
+            ok, infos = await notion_create_note_intelligente(inp.get("texte", ""))
+            if ok:
+                action = infos.get("action", "")
+                contact = infos.get("nom_contact", "")
+                produits = infos.get("produits_evoques", "")
+                result = f"✅ Note enregistrée dans Notion\n"
+                result += f"Action : {action}\n"
+                if contact:
+                    result += f"Contact : {contact}\n"
+                if produits:
+                    result += f"Produits : {produits}\n"
+                return result
+            return "❌ Erreur lors de l'enregistrement dans Notion."
         elif name == "lister_devis":
             r = await notion_query(NOTION_DBS["devis"], page_size=inp.get("limite", 5))
             return format_results(r, "Devis")
@@ -185,6 +270,7 @@ async def execute_tool(name: str, inp: dict) -> str:
         logger.error(f"Erreur outil {name}: {e}")
         return f"Erreur : {str(e)}"
 
+
 # ── System prompt ───────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """Tu es Big Marta, l'assistante commerciale intelligente de Geoffroy, agent commercial indépendant spécialisé vins, champagnes et spiritueux sous l'enseigne Sylvins, région PACA.
@@ -192,12 +278,15 @@ SYSTEM_PROMPT = """Tu es Big Marta, l'assistante commerciale intelligente de Geo
 Tu as accès à ses bases Notion via des outils :
 - chercher_client / lister_clients : base Clients/Prospects
 - chercher_vigneron / lister_vignerons : base Vignerons
-- ajouter_note_terrain : sauvegarder une note de visite ou remarque terrain
+- ajouter_note_terrain : analyse et sauvegarde une note terrain avec tous les champs (action, contact, produits, date...)
 - lister_devis : base Devis
 
-Utilise toujours les outils Notion pour répondre avec des données réelles quand Geoffroy pose des questions sur ses clients, vignerons ou devis.
-Quand il dicte une note terrain, sauvegarde-la immédiatement avec ajouter_note_terrain.
+IMPORTANT pour les notes terrain :
+- Quand Geoffroy dicte une note (visite, commande, rappel, info client...), utilise TOUJOURS ajouter_note_terrain avec le texte complet
+- L'outil analyse automatiquement le texte et remplit tous les champs Notion
+- Confirme ensuite à Geoffroy ce qui a été enregistré (action détectée, contact, produits)
 
+Utilise les outils Notion pour répondre avec des données réelles.
 Ton ton est professionnel mais chaleureux, efficace et concis. Tu réponds en français."""
 
 # ── État des conversations ──────────────────────────────────────────────────────
@@ -212,15 +301,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     conversation_history[chat_id] = []
     await update.message.reply_text(
-        "👋 Bonjour Geoffroy\\! Je suis *Big Marta*, ton assistante Sylvins\\.\n\n"
+        "👋 Bonjour Geoffroy ! Je suis Big Marta, ton assistante Sylvins.\n\n"
         "J'ai accès à tes bases Notion 📋\n\n"
         "Tu peux me demander :\n"
-        "• _Cherche le client X_\n"
-        "• _Liste mes vignerons_\n"
-        "• _Note terrain : visité untel, intéressé par\\.\\.\\._\n"
-        "• _Montre mes derniers devis_\n\n"
-        "Dis\\-moi ce que tu veux faire \\! 🍷",
-        parse_mode="MarkdownV2"
+        "• Cherche le client X\n"
+        "• Liste mes vignerons\n"
+        "• Note terrain : visité untel, intéressé par...\n"
+        "• Montre mes derniers devis\n\n"
+        "Dis-moi ce que tu veux faire ! 🍷"
     )
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -296,7 +384,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("🚀 Big Marta Bot (Notion) démarré...")
+    logger.info("🚀 Big Marta Bot (Notion intelligent) démarré...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
