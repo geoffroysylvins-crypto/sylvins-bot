@@ -8,6 +8,12 @@ import os
 import json
 import logging
 import httpx
+import imaplib
+import smtplib
+import email
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.header import decode_header
 from datetime import date
 import anthropic
 from telegram import Update
@@ -19,6 +25,10 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 
 ALLOWED_CHAT_IDS = {7562707563}
+
+# ── Configuration Gmail ────────────────────────────────────────────────────────
+GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 
 # ── IDs des bases Notion ────────────────────────────────────────────────────────
 NOTION_DBS = {
@@ -77,7 +87,7 @@ Règles :
 - type_contact "vigneron" si c'est un domaine/producteur de vin, "client" si c'est un restaurant/bar/caviste/cave
 - nom_contact : c'est le CLIENT (restaurant, bar, caviste, cave...) qui reçoit la visite ou passe commande, PAS le producteur/domaine
 - produits_evoques : ce sont les VINS ou produits du domaine/producteur mentionné (ex: "vins du Domaine X", "champagne Y"). Si un domaine est mentionné comme fournisseur, ses vins sont les produits. Ne pas mettre le nom du client dans les produits.
-- Exemple : "Cave 1990 a dégusté le domaine Clos Canereccia" → nom_contact="Cave 1990", type_contact="client", produits_evoques="vins du Domaine Clos Canereccia""""
+- Exemple : Cave 1990 a deguste le domaine Clos Canereccia → nom_contact=Cave 1990, type_contact=client, produits_evoques=vins du Domaine Clos Canereccia"""
 
     resp = anthropic_client.messages.create(
         model="claude-sonnet-4-5",
@@ -181,6 +191,141 @@ def format_results(results: list, label: str) -> str:
     return "\n".join(lines)
 
 
+
+# ── Fonctions Gmail ─────────────────────────────────────────────────────────────
+
+def decode_str(s):
+    """Décode un header email."""
+    if not s:
+        return ""
+    parts = decode_header(s)
+    result = []
+    for part, enc in parts:
+        if isinstance(part, bytes):
+            result.append(part.decode(enc or "utf-8", errors="replace"))
+        else:
+            result.append(part)
+    return "".join(result)
+
+def get_email_body(msg) -> str:
+    """Extrait le corps texte d'un email."""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            cd = str(part.get("Content-Disposition", ""))
+            if ct == "text/plain" and "attachment" not in cd:
+                charset = part.get_content_charset() or "utf-8"
+                return part.get_payload(decode=True).decode(charset, errors="replace")
+    else:
+        charset = msg.get_content_charset() or "utf-8"
+        return msg.get_payload(decode=True).decode(charset, errors="replace")
+    return ""
+
+async def fetch_recent_emails(count: int = 5) -> list[dict]:
+    """Récupère les derniers emails non lus."""
+    try:
+        imap = imaplib.IMAP4_SSL("imap.gmail.com")
+        imap.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+        imap.select("INBOX")
+        
+        _, data = imap.search(None, "UNSEEN")
+        ids = data[0].split()
+        ids = ids[-count:] if len(ids) > count else ids
+        ids = list(reversed(ids))
+        
+        emails = []
+        for eid in ids:
+            _, msg_data = imap.fetch(eid, "(RFC822)")
+            msg = email.message_from_bytes(msg_data[0][1])
+            emails.append({
+                "id": eid.decode(),
+                "from": decode_str(msg.get("From", "")),
+                "subject": decode_str(msg.get("Subject", "")),
+                "date": msg.get("Date", ""),
+                "body": get_email_body(msg)[:1000],
+            })
+        
+        imap.logout()
+        return emails
+    except Exception as e:
+        logger.error(f"Erreur IMAP: {e}")
+        return []
+
+async def fetch_all_recent_emails(count: int = 10) -> list[dict]:
+    """Récupère les derniers emails (lus et non lus)."""
+    try:
+        imap = imaplib.IMAP4_SSL("imap.gmail.com")
+        imap.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+        imap.select("INBOX")
+        
+        _, data = imap.search(None, "ALL")
+        ids = data[0].split()
+        ids = ids[-count:] if len(ids) > count else ids
+        ids = list(reversed(ids))
+        
+        emails = []
+        for eid in ids:
+            _, msg_data = imap.fetch(eid, "(RFC822)")
+            msg = email.message_from_bytes(msg_data[0][1])
+            emails.append({
+                "id": eid.decode(),
+                "from": decode_str(msg.get("From", "")),
+                "subject": decode_str(msg.get("Subject", "")),
+                "date": msg.get("Date", ""),
+                "body": get_email_body(msg)[:1500],
+            })
+        
+        imap.logout()
+        return emails
+    except Exception as e:
+        logger.error(f"Erreur IMAP: {e}")
+        return []
+
+async def send_email_reply(to: str, subject: str, body: str, in_reply_to: str = "") -> bool:
+    """Envoie un email via Gmail."""
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = GMAIL_ADDRESS
+        msg["To"] = to
+        msg["Subject"] = subject
+        if in_reply_to:
+            msg["In-Reply-To"] = in_reply_to
+            msg["References"] = in_reply_to
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        logger.error(f"Erreur SMTP: {e}")
+        return False
+
+async def classifier_email(email_data: dict) -> dict:
+    """Classifie un email avec Claude."""
+    prompt = f"""Analyse cet email reçu par Geoffroy Beaucousin, agent commercial vins/spiritueux Sylvins en PACA.
+
+De : {email_data['from']}
+Sujet : {email_data['subject']}
+Corps : {email_data['body'][:500]}
+
+Réponds UNIQUEMENT en JSON :
+{{
+  "categorie": "commande|tarif|relance|rdv|info|reclamation|newsletter|spam|autre",
+  "priorite": "haute|normale|basse",
+  "resume": "résumé en 1 phrase",
+  "action_suggeree": "action recommandée courte",
+  "expediteur_type": "client|vigneron|prospect|fournisseur|autre"
+}}"""
+
+    resp = anthropic_client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    raw = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+    return json.loads(raw)
+
 # ── Outils Claude ───────────────────────────────────────────────────────────────
 
 TOOLS = [
@@ -237,6 +382,35 @@ TOOLS = [
             "properties": {"limite": {"type": "integer", "default": 5}}
         }
     },
+    {
+        "name": "lire_emails_non_lus",
+        "description": "Lit les derniers emails non lus de Gmail et les classifie",
+        "input_schema": {
+            "type": "object",
+            "properties": {"nombre": {"type": "integer", "default": 5, "description": "Nombre d'emails à récupérer"}}
+        }
+    },
+    {
+        "name": "lire_emails_recents",
+        "description": "Lit les derniers emails reçus (lus et non lus)",
+        "input_schema": {
+            "type": "object",
+            "properties": {"nombre": {"type": "integer", "default": 10}}
+        }
+    },
+    {
+        "name": "envoyer_email",
+        "description": "Envoie ou répond à un email via Gmail",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "destinataire": {"type": "string", "description": "Adresse email du destinataire"},
+                "sujet": {"type": "string", "description": "Sujet de l'email"},
+                "corps": {"type": "string", "description": "Corps de l'email en texte"}
+            },
+            "required": ["destinataire", "sujet", "corps"]
+        }
+    },
 ]
 
 
@@ -271,6 +445,41 @@ async def execute_tool(name: str, inp: dict) -> str:
         elif name == "lister_devis":
             r = await notion_query(NOTION_DBS["devis"], page_size=inp.get("limite", 5))
             return format_results(r, "Devis")
+        elif name == "lire_emails_non_lus":
+            emails = await fetch_recent_emails(inp.get("nombre", 5))
+            if not emails:
+                return "Aucun email non lu."
+            lines = ["📬 " + str(len(emails)) + " email(s) non lu(s)\n"]
+            for i, em in enumerate(emails, 1):
+                try:
+                    classif = await classifier_email(em)
+                    priorite_emoji = "🔴" if classif.get("priorite") == "haute" else "🟡" if classif.get("priorite") == "normale" else "🟢"
+                    lines.append(str(i) + ". " + priorite_emoji + " *" + em['subject'][:50] + "*")
+                    lines.append("   De : " + em['from'][:50])
+                    lines.append("   " + classif.get("resume", ""))
+                    lines.append("   Action : " + classif.get('action_suggeree', '') + "\n")
+                except:
+                    lines.append(str(i) + ". " + em['subject'][:50] + " — De : " + em['from'][:50] + "\n")
+            return "\n".join(lines)
+        elif name == "lire_emails_recents":
+            emails = await fetch_all_recent_emails(inp.get("nombre", 10))
+            if not emails:
+                return "Aucun email trouvé."
+            lines = ["📧 " + str(len(emails)) + " email(s) récents\n"]
+            for i, em in enumerate(emails, 1):
+                lines.append(str(i) + ". *" + em['subject'][:50] + "*")
+                lines.append("   De : " + em['from'][:50])
+                lines.append("   " + em['date'][:16] + "\n")
+            return "\n".join(lines)
+        elif name == "envoyer_email":
+            ok = await send_email_reply(
+                to=inp.get("destinataire", ""),
+                subject=inp.get("sujet", ""),
+                body=inp.get("corps", "")
+            )
+            if ok:
+                return f"✅ Email envoyé à {inp.get('destinataire')}"
+            return "❌ Erreur lors de l'envoi de l'email."
         return f"Outil inconnu : {name}"
     except Exception as e:
         logger.error(f"Erreur outil {name}: {e}")
@@ -292,7 +501,12 @@ IMPORTANT pour les notes terrain :
 - L'outil analyse automatiquement le texte et remplit tous les champs Notion
 - Confirme ensuite à Geoffroy ce qui a été enregistré (action détectée, contact, produits)
 
-Utilise les outils Notion pour répondre avec des données réelles.
+IMPORTANT pour les emails :
+- lire_emails_non_lus : affiche les emails non lus avec classification et action suggérée
+- lire_emails_recents : affiche les derniers emails reçus
+- envoyer_email : envoie un email — TOUJOURS demander confirmation à Geoffroy avant d'envoyer
+- Pour répondre à un email, demande confirmation du contenu avant d'envoyer
+
 Ton ton est professionnel mais chaleureux, efficace et concis. Tu réponds en français."""
 
 # ── État des conversations ──────────────────────────────────────────────────────
