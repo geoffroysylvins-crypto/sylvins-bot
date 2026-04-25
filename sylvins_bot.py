@@ -293,7 +293,9 @@ async def send_email_reply(to: str, subject: str, body: str, in_reply_to: str = 
             msg["References"] = in_reply_to
         msg.attach(MIMEText(body, "plain", "utf-8"))
         
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.ehlo()
+            server.starttls()
             server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
             server.send_message(msg)
         return True
