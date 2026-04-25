@@ -74,7 +74,10 @@ Règles :
 - action "Devis à faire" si devis demandé
 - action "Info enregistrée" par défaut
 - montant : nombre entier en euros si mentionné, sinon 0
-- type_contact "vigneron" si c'est un domaine/producteur, "client" si CHR ou caviste"""
+- type_contact "vigneron" si c'est un domaine/producteur de vin, "client" si c'est un restaurant/bar/caviste/cave
+- nom_contact : c'est le CLIENT (restaurant, bar, caviste, cave...) qui reçoit la visite ou passe commande, PAS le producteur/domaine
+- produits_evoques : ce sont les VINS ou produits du domaine/producteur mentionné (ex: "vins du Domaine X", "champagne Y"). Si un domaine est mentionné comme fournisseur, ses vins sont les produits. Ne pas mettre le nom du client dans les produits.
+- Exemple : "Cave 1990 a dégusté le domaine Clos Canereccia" → nom_contact="Cave 1990", type_contact="client", produits_evoques="vins du Domaine Clos Canereccia""""
 
     resp = anthropic_client.messages.create(
         model="claude-sonnet-4-5",
