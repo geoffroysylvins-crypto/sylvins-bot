@@ -309,6 +309,9 @@ De : {email_data['from']}
 Sujet : {email_data['subject']}
 Corps : {email_data['body'][:500]}
 
+FOURNISSEURS ET VIGNERONS DE CONFIANCE (ne jamais marquer comme fraude) :
+Maxime Magnon, Epicurvins, Fabien Jouves, Tariquet, Expression Sud Ouest, Clovallon Mas d'Alezon, Aupilhac, Renardière, Montfaucon, Chave JL, Rayas Tours, Boisson, Gilles Robin, Aphillanthes, Aurelien Chatagnier, Cecillon, Clos du Calvaire, Trapadis, Mas du Centenaire, Vieux Telegraphe, Brunier, Agnès Paquet, Devillard, Bouchard, Darviot Perrin, Marechal, Nicolas Gouffier, Buisson Charles, Breth Brothers, Lamarche, Coche Fabien, Taupenot Merme, Grands Bourgogne, Sylvain Pataille, Chevalier, Justin Girardin, William Fevre, Lechenaut, Larue, Mongeard Mugneret, Lassarat, D'Henri, Clos de l'Ours, Gros Noré, Réaltiere, Suffrene, Tempier, Clos St Vincent, Bagnol, Henri Bonnaud, Paquette, Capelude, Gayolle, Zusslin, Kubler, Jerome Bretaudeau, Serol, Bérioles, Terres blanches, Accoles, Madonne, Crochet, Charles Joguet, Minchin, Calsac, Dhondt Grellet, Henriot, Jacquesson, Rogerie, Coquard Bour, Paillard, Mignon Christophe, Seleque JM, Egly Ouriet, Girard Bonnet, Laherte, Clos Canereccia, Dupont, Jacoulot, Grosse Pierre, Valma, Lfite Rothschild, Cuvelier, Le Novi, Henri Chauvet, Fabien coche, Abbatucci, Bouchard Père et Fils, Cave de Capelude
+
 Réponds UNIQUEMENT en JSON :
 {{
   "categorie": "commande|tarif|relance|rdv|info|reclamation|newsletter|spam|autre",
