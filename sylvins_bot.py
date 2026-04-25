@@ -25,7 +25,7 @@ NOTION_DBS = {
     "vignerons":     "2643dc87a651813a8ceed8bcd55ef908",
     "clients":       "25f3dc87a651812f918ae6a277bfccdf",
     "log_emails":    "f89fcc2d89264ac08a5944cf3456b754",
-    "notes_terrain": "eba32196854b4234a8df9b5c395de754",
+    "notes_terrain": "996af890-8ec0-4aaf-bddd-860a0b7acc0a",
     "tarifs":        "90a46dc5190a4f1fabe000d0fa41e2d8",
     "devis":         "4587c0b9c6a64acc9d033b4ddeaf551a",
 }
@@ -129,9 +129,12 @@ async def notion_create_note_intelligente(texte_original: str) -> tuple[bool, di
         "Résumé": {"title": [{"text": {"content": infos.get("resume", texte_original[:80])}}]},
         "Action": {"select": {"name": infos.get("action", "Info enregistrée")}},
         "Date": {"date": {"start": today}},
-        "Message d'origine": {"rich_text": [{"text": {"content": texte_original[:2000]}}]},
+        "Message original": {"rich_text": [{"text": {"content": texte_original[:2000]}}]},
         "Note complète": {"rich_text": [{"text": {"content": infos.get("note_complete", texte_original)[:2000]}}]},
-        "Type de contact": {"select": {"name": infos.get("type_contact", "inconnu")}},
+        "Type contact": {"select": {"name": {
+            "client": "Client", "vigneron": "Vigneron", "prospect": "Prospect",
+            "fournisseur": "Fournisseur", "team sylvins": "Team Sylvins", "inconnu": "Inconnu"
+        }.get(infos.get("type_contact", "inconnu").lower(), "Inconnu")}},
     }
 
     if infos.get("nom_contact"):
@@ -144,7 +147,7 @@ async def notion_create_note_intelligente(texte_original: str) -> tuple[bool, di
         properties["Montant €"] = {"number": float(infos["montant"])}
 
     payload = {
-        "parent": {"database_id": NOTION_DBS["notes_terrain"]},
+        "parent": {"type": "data_source_id", "data_source_id": NOTION_DBS["notes_terrain"]},
         "properties": properties,
     }
 
